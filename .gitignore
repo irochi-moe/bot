@@ -43,3 +43,5 @@ run/
 logs/
 
 !gradle/wrapper/gradle-wrapper.jar
+/node_modules
+package-lock.json

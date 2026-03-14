@@ -121,6 +121,8 @@ async function checkImageAndModerate(message, imageUrl) {
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.startsWith('image/')) return false;
 
+    const mimeType = contentType.split(';')[0].trim();
+
     const buffer = await response.arrayBuffer();
     const bufferData = Buffer.from(buffer);
     const hash = crypto.createHash('sha256').update(bufferData).digest('hex');
@@ -173,7 +175,7 @@ async function checkImageAndModerate(message, imageUrl) {
       .generateContent([prompt, {
         inlineData: {
           data: base64Image,
-          mimeType: contentType
+          mimeType,
         }
       }])
       .then((r) => r.response.text().trim().toUpperCase().includes('TRUE'));
