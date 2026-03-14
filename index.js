@@ -42,6 +42,25 @@ const BAD_KEYWORDS = [
 const INVITE_REGEX = /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
 const IMAGE_URL_REGEX = /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
 
+const DIVIDER = '─'.repeat(50);
+
+function logBlock(type, message, extra = {}) {
+  const guild = message.guild?.name ?? 'DM';
+  const channel = message.channel?.name ?? '알 수 없음';
+  const author = message.author?.tag ?? '알 수 없음';
+  const authorId = message.author?.id ?? '알 수 없음';
+
+  const lines = [
+    `[${type}] 서버: ${guild} | 채널: #${channel} | 작성자: ${author} (${authorId})`,
+  ];
+  if (extra.reason)    lines.push(`사유: ${extra.reason}`);
+  if (extra.content)   lines.push(`내용: ${extra.content}`);
+  if (extra.imageUrl)  lines.push(`이미지: ${extra.imageUrl}`);
+  lines.push(DIVIDER);
+
+  console.log(lines.join('\n'));
+}
+
 async function sendTemporaryWarning(channel, content) {
   try {
     const warning = await channel.send(content);
@@ -72,8 +91,8 @@ async function isServerNameMalicious(serverName) {
   if (!serverName) return false;
 
   const lowerName = serverName.toLowerCase();
-  if (BAD_KEYWORDS.some((kw) => lowerName.includes(kw))) return true;
-  if (badServerNames.has(serverName)) return true;
+  if (BAD_KEYWORDS.some((kw) => lowerName.includes(kw))) return 'keyword';
+  if (badServerNames.has(serverName)) return 'cache';
   if (goodServerNames.has(serverName)) return false;
 
   try {
@@ -89,7 +108,7 @@ async function isServerNameMalicious(serverName) {
     if (isBad) badServerNames.add(serverName);
     else goodServerNames.add(serverName);
 
-    return isBad;
+    return isBad ? 'ai' : false;
   } catch (err) {
     console.error('서버 이름 텍스트 분석 중 오류:', err);
     return false;
@@ -111,9 +130,12 @@ async function checkImageAndModerate(message, imageUrl) {
       if (deleted) {
         await sendTemporaryWarning(
           message.channel,
-          `🚨 <@${message.author.id}> 해킹/스팸 이미지가 감지되어 메시지가 자동 삭제되었습니다! (캐시 차단)`
+          `🚨 <@${message.author.id}> 부적절한 메시지가 감지되어 삭제되었습니다.`
         );
-        console.log(`[캐시 차단] 작성자: ${message.author.tag} (동일 이미지 재업로드)`);
+        logBlock('이미지 차단 [캐시]', message, {
+          reason: '캐시에 등록된 해킹/스팸 이미지 재업로드',
+          imageUrl,
+        });
       }
       return deleted;
     }
@@ -129,9 +151,12 @@ async function checkImageAndModerate(message, imageUrl) {
       if (deleted) {
         await sendTemporaryWarning(
           message.channel,
-          `🚨 <@${message.author.id}> 해킹/스팸 이미지가 감지되어 메시지가 자동 삭제되었습니다! (동시 대기 차단)`
+          `🚨 <@${message.author.id}> 부적절한 메시지가 감지되어 삭제되었습니다.`
         );
-        console.log(`[동시 대기 차단] 작성자: ${message.author.tag}`);
+        logBlock('이미지 차단 [캐시 - 동시 대기]', message, {
+          reason: 'AI 분석 중인 동일 이미지 동시 업로드',
+          imageUrl,
+        });
       }
       return deleted;
     }
@@ -140,6 +165,7 @@ async function checkImageAndModerate(message, imageUrl) {
     const prompt = `
       이 이미지가 일론 머스크나 유명인을 사칭한 암호화폐 사기(Scam),
       해킹된 계정의 스팸 트윗, 또는 불법적인 링크 유도 이미지인지 판별해줘.
+      단, 마인크래프트 등 게임의 정상적인 디스코드 서버 연동/인증 안내 화면이나 평범한 게임 플레이 스크린샷은 스팸이 아니므로 반드시 'FALSE'로 판별해.
       부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
     `.trim();
 
@@ -170,14 +196,12 @@ async function checkImageAndModerate(message, imageUrl) {
     if (deleted) {
       await sendTemporaryWarning(
         message.channel,
-        `🚨 <@${message.author.id}> 해킹/스팸 이미지가 감지되어 메시지가 자동 삭제되었습니다!`
+        `🚨 <@${message.author.id}> 부적절한 메시지가 감지되어 삭제되었습니다.`
       );
-      console.log(
-        `[이미지 삭제됨] 서버: ${message.guild?.name ?? 'DM'} | ` +
-        `채널: #${message.channel?.name ?? '알 수 없음'} | ` +
-        `작성자: ${message.author.tag}`
-      );
-      console.log('-'.repeat(50));
+      logBlock('이미지 차단 [AI]', message, {
+        reason: 'AI 분석 결과 해킹/스팸 이미지',
+        imageUrl,
+      });
     }
     return deleted;
 
@@ -195,21 +219,32 @@ client.on(Events.MessageCreate, async (message) => {
 
   if (invites.length > 0) {
     let shouldDelete = false;
-    let deleteReason = '부적절한 서버 홍보 링크';
+    let deleteReason = '';
+    let logType = '링크 차단';
 
     for (const match of invites) {
       try {
         const invite = await client.fetchInvite(match[1]);
         const serverName = invite.guild?.name ?? '';
-        const isBad = await isServerNameMalicious(serverName);
+        const result = await isServerNameMalicious(serverName);
 
-        if (isBad) {
+        if (result) {
           shouldDelete = true;
-          deleteReason = `부적절한 이름의 서버 홍보 링크 (서버 이름: ${serverName})`;
+          if (result === 'keyword') {
+            logType = '링크 차단 [키워드]';
+            deleteReason = `서버 이름에 금지 키워드 포함 (서버 이름: ${serverName})`;
+          } else if (result === 'ai') {
+            logType = '링크 차단 [AI]';
+            deleteReason = `AI 분석 결과 부적절한 서버 (서버 이름: ${serverName})`;
+          } else if (result === 'cache') {
+            logType = '링크 차단 [캐시]';
+            deleteReason = `캐시에 등록된 부적절한 서버 (서버 이름: ${serverName})`;
+          }
           break;
         }
       } catch {
         shouldDelete = true;
+        logType = '링크 차단 [만료]';
         deleteReason = '유효하지 않거나 만료된 초대 링크';
         break;
       }
@@ -220,11 +255,12 @@ client.on(Events.MessageCreate, async (message) => {
       if (deleted) {
         await sendTemporaryWarning(
           message.channel,
-          `🚨 <@${message.author.id}> ${deleteReason}는 올릴 수 없습니다.`
+          `🚨 <@${message.author.id}> 부적절한 메시지가 감지되어 삭제되었습니다.`
         );
-        console.log(`[링크 차단] 사유: ${deleteReason} | 작성자: ${message.author.tag}`);
-        console.log(`내용: ${message.content}`);
-        console.log('-'.repeat(50));
+        logBlock(logType, message, {
+          reason: deleteReason,
+          content: message.content,
+        });
       }
       return;
     }
