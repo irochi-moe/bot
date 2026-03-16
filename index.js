@@ -56,6 +56,7 @@ function logBlock(type, message, extra = {}) {
   if (extra.reason)    lines.push(`사유: ${extra.reason}`);
   if (extra.content)   lines.push(`내용: ${extra.content}`);
   if (extra.imageUrl)  lines.push(`이미지: ${extra.imageUrl}`);
+  if (extra.error)     lines.push(`오류: ${extra.error}`);
   lines.push(DIVIDER);
 
   console.log(lines.join('\n'));
@@ -66,7 +67,9 @@ async function sendTemporaryWarning(channel, content) {
     const warning = await channel.send(content);
     setTimeout(() => warning.delete().catch(() => {}), 10_000);
   } catch (err) {
-    console.error('경고 메시지 전송 실패:', err);
+    const guild = channel.guild?.name ?? 'DM';
+    const chName = channel.name ?? '알 수 없음';
+    console.error(`[오류] 경고 메시지 전송 실패 - 서버: ${guild} | 채널: #${chName}\n오류: ${err}`);
   }
 }
 
@@ -79,9 +82,9 @@ async function tryDeleteMessage(message) {
     return false;
   } catch (err) {
     if (err.code === 50013) {
-      console.warn(`[권한 부족] 메시지 삭제 실패 - 서버: ${message.guild?.name}`);
+      console.warn(`[권한 부족] 메시지 삭제 실패 - 서버: ${message.guild?.name} | 채널: #${message.channel?.name ?? '알 수 없음'}`);
     } else if (err.code !== 10008) {
-      console.error('메시지 삭제 중 오류:', err);
+      console.error(`[오류] 메시지 삭제 실패 - 서버: ${message.guild?.name} | 채널: #${message.channel?.name ?? '알 수 없음'}\n오류: ${err}`);
     }
     return false;
   }
@@ -110,7 +113,7 @@ async function isServerNameMalicious(serverName) {
 
     return isBad ? 'ai' : false;
   } catch (err) {
-    console.error('서버 이름 텍스트 분석 중 오류:', err);
+    console.error(`[오류] 서버 이름 AI 분석 실패 - 서버 이름: "${serverName}"\n오류: ${err}`);
     return false;
   }
 }
@@ -208,13 +211,20 @@ async function checkImageAndModerate(message, imageUrl) {
     return deleted;
 
   } catch (err) {
-    console.error('이미지 분석 중 오류 발생:', err);
+    logBlock('오류 [이미지 분석]', message, {
+      reason: err.constructor?.name ?? '알 수 없는 오류',
+      imageUrl,
+      content: message.content || '(첨부파일)',
+      error: String(err),
+    });
     return false;
   }
 }
 
 client.on(Events.MessageCreate, async (message) => {
+  if (!message.guild) return;
   if (message.author.bot) return;
+  if (!message.guild) return;
 
   INVITE_REGEX.lastIndex = 0;
   const invites = [...message.content.matchAll(INVITE_REGEX)];
@@ -287,6 +297,7 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  if (!newMessage.guild) return;
   if (newMessage.author?.bot) return;
   if (newMessage.embeds.length === 0) return;
 
