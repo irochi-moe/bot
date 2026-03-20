@@ -36,7 +36,7 @@ const processingImages = new Map();
 
 const BAD_KEYWORDS = [
   'r18', '18+', 'nsfw', 'nude', 'hack', 'nitro', 'porn', 'sex',
-  'casino', 'coin', 'crypto', '니트로', '카딩', '해킹툴', '키로거',
+  'coin', 'crypto', '니트로', '카딩', '해킹툴', '키로거', 'sexy'
 ];
 
 const INVITE_REGEX = /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
@@ -168,9 +168,12 @@ async function checkImageAndModerate(message, imageUrl) {
 
     const base64Image = bufferData.toString('base64');
     const prompt = `
-      이 이미지가 일론 머스크나 유명인을 사칭한 암호화폐 사기(Scam),
-      해킹된 계정의 스팸 트윗, 또는 불법적인 링크 유도 이미지인지 판별해줘.
-      단, 마인크래프트 등 게임의 정상적인 디스코드 서버 연동/인증 안내 화면이나 평범한 게임 플레이 스크린샷은 스팸이 아니므로 반드시 'FALSE'로 판별해.
+이 이미지가 일론 머스크 사칭 암호화폐 사기(Scam), 해킹된 계정의 악성 트윗, 또는 불법 외부 링크 유도 스팸인지 판별해.
+
+      [※ 핵심 예외 조건 - 아래의 경우는 반드시 'FALSE'로 판별할 것]
+      1. 마인크래프트 등 게임의 플레이 화면, 게임 내 UI, 게임 내 채팅창 캡처본.
+      2. 게임 채팅창에 '도박', '룰렛', '카지노', '바니걸', '거래' 등의 단어가 있더라도, 이는 게임 내 미니게임이나 인게임 아이템에 관한 대화일 뿐 실제 불법 스팸이나 음란물이 아니므로 절대 차단하지 마.
+
       부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
     `.trim();
 
