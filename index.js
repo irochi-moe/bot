@@ -5,6 +5,7 @@ const {
   GatewayIntentBits,
   ActivityType,
   Events,
+  PermissionFlagsBits,
 } = require('discord.js');
 const {
   GoogleGenerativeAI
@@ -94,13 +95,18 @@ async function isServerNameMalicious(serverName) {
   if (!serverName) return false;
 
   const lowerName = serverName.toLowerCase();
-  if (BAD_KEYWORDS.some((kw) => lowerName.includes(kw))) return 'keyword';
-  if (badServerNames.has(serverName)) return 'cache';
+  if (BAD_KEYWORDS.some((kw) => lowerName.includes(kw))) return true;
+  if (badServerNames.has(serverName))  return true;
   if (goodServerNames.has(serverName)) return false;
 
   try {
     const prompt = `
-      다음 디스코드 서버 이름이 해킹, 사기, NSFW(성인물, 음란물), 성적인 내용, 욕설 등 불건전하거나 악의적인 목적을 띠고 있는지 판별해줘.
+      다음 디스코드 서버 이름이 해킹, 사기, NSFW(성인물, 음란물), 불법 카지노 홍보, 욕설 등 악의적인 목적을 띠고 있는지 판별해줘.
+
+      [※ 예외 조건 - 무조건 'FALSE'로 판별할 것]
+      우리는 마인크래프트 서버를 운영 중이며, 게임 내 경제/카지노 미니게임을 허용하고 있어.
+      서버 이름에 '카지노', '도박', '코인', '배팅' 같은 단어가 포함되어 있더라도, 맥락상 게임 서버, 길드, 일반 커뮤니티 이름으로 보인다면 스팸이 아니므로 반드시 'FALSE'로 대답해. 현실의 불법 성인물/도박장/해킹 서버 이름일 때만 'TRUE'를 반환해.
+
       서버 이름: "${serverName}"
       부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
     `.trim();
@@ -111,9 +117,9 @@ async function isServerNameMalicious(serverName) {
     if (isBad) badServerNames.add(serverName);
     else goodServerNames.add(serverName);
 
-    return isBad ? 'ai' : false;
+    return isBad;
   } catch (err) {
-    console.error(`[오류] 서버 이름 AI 분석 실패 - 서버 이름: "${serverName}"\n오류: ${err}`);
+    console.error('서버 이름 텍스트 분석 중 오류:', err);
     return false;
   }
 }
@@ -168,12 +174,15 @@ async function checkImageAndModerate(message, imageUrl) {
 
     const base64Image = bufferData.toString('base64');
     const prompt = `
-이 이미지가 일론 머스크 사칭 암호화폐 사기(Scam), 해킹된 계정의 악성 트윗, 또는 불법 외부 링크 유도 스팸인지 판별해.
+      이 이미지가 암호화폐 사기(Scam), 해킹된 계정의 스팸 트윗, 현실의 불법 카지노/도박장 홍보, 또는 악성 링크 유도 스팸인지 판별해.
 
-      [※ 핵심 예외 조건 - 아래의 경우는 반드시 'FALSE'로 판별할 것]
-      1. 마인크래프트 등 게임의 플레이 화면, 게임 내 UI, 게임 내 채팅창 캡처본.
-      2. 게임 채팅창에 '도박', '룰렛', '카지노', '바니걸', '거래' 등의 단어가 있더라도, 이는 게임 내 미니게임이나 인게임 아이템에 관한 대화일 뿐 실제 불법 스팸이나 음란물이 아니므로 절대 차단하지 마.
+      [※ 핵심 예외 조건 - 아래의 경우는 무조건 'FALSE'로 판별할 것]
+      1. 마인크래프트 등 게임의 플레이 화면, 픽셀 그래픽 배경, 게임 내 UI, 채팅창 화면은 절대 차단하지 마.
+      2. 게임 화면 안에 '카지노', '도박', '룰렛', '거래' 등의 단어가 있더라도, 게임 내 콘텐츠이므로 스팸이 아니야.
+      3. 토스(Toss), 카카오페이, 일반 은행 앱 등의 정상적인 '송금 완료', '결제 내역' 영수증 스크린샷은 유저 간 정상적인 거래 인증용이므로 절대 차단하지 마.
+      4. 인터넷 밈(Meme, 예: Wojak, Pepe 등), 유머용 짤방, 리액션 이미지, 단순한 텍스트 캡처본은 명백한 사기/도박 웹사이트 주소(URL)가 포함되어 있지 않은 한 절대 차단하지 마.
 
+      오직 '게임/금융/일반 유머가 아닌' 실제 불법 도박장 홍보물, 일론 머스크 사칭, 코인 사기, 외부 악성 링크 유도일 경우에만 'TRUE'를 출력해.
       부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
     `.trim();
 
@@ -228,6 +237,9 @@ client.on(Events.MessageCreate, async (message) => {
   if (!message.guild) return;
   if (message.author.bot) return;
   if (!message.guild) return;
+  if (message.member && message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+    return;
+  }
 
   INVITE_REGEX.lastIndex = 0;
   const invites = [...message.content.matchAll(INVITE_REGEX)];
@@ -303,6 +315,9 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   if (!newMessage.guild) return;
   if (newMessage.author?.bot) return;
   if (newMessage.embeds.length === 0) return;
+  if (newMessage.member && newMessage.member.permissions.has(PermissionFlagsBits.Administrator)) {
+    return;
+  }
 
   if (recentlyProcessed.has(newMessage.id)) return;
   recentlyProcessed.add(newMessage.id);
