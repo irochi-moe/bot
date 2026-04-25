@@ -8,6 +8,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { OpenAI }             = require('openai');
 
 const inviteRegex   = () => /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
 const imageUrlRegex = () => /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
@@ -39,8 +40,10 @@ const goodServerNames   = new BoundedSet(500);
 const badImageHashes    = new BoundedSet(500);
 const goodImageHashes   = new BoundedSet(500);
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' });
+const geminiModel = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  .getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' });
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const client = new Client({
   intents: [
@@ -136,6 +139,71 @@ function shouldIgnore(message) {
   );
 }
 
+function is503(err) {
+  return err?.status === 503 || String(err?.message).includes('503');
+}
+
+async function analyzeWithFallback(primary, fallback) {
+  try {
+    return await primary();
+  } catch (err) {
+    if (!is503(err)) throw err;
+    console.log('⏳ [API 지연] Gemini 혼잡 (503) → OpenAI로 전환합니다.');
+    return await fallback();
+  }
+}
+
+async function geminiText(prompt) {
+  const result = await geminiModel.generateContent(prompt);
+  return result.response.text().trim().toUpperCase().includes('TRUE');
+}
+
+async function geminiImage(prompt, base64Image, mimeType) {
+  const result = await geminiModel.generateContent([
+    prompt,
+    { inlineData: { data: base64Image, mimeType } },
+  ]);
+  return result.response.text().trim().toUpperCase().includes('TRUE');
+}
+
+async function openaiText(prompt) {
+  const res = await openai.chat.completions.create({
+    model: 'gpt-5.4-nano',
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 5,
+  });
+  return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
+}
+
+async function openaiImage(prompt, base64Image, mimeType) {
+  const res = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text',      text: prompt },
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
+      ],
+    }],
+    max_tokens: 5,
+  });
+  return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
+}
+
+function analyzeText(prompt) {
+  return analyzeWithFallback(
+    ()  => geminiText(prompt),
+    ()  => openaiText(prompt),
+  );
+}
+
+function analyzeImage(prompt, base64Image, mimeType) {
+  return analyzeWithFallback(
+    () => geminiImage(prompt, base64Image, mimeType),
+    () => openaiImage(prompt, base64Image, mimeType),
+  );
+}
+
 async function isServerNameMalicious(serverName) {
   if (!serverName) return false;
 
@@ -161,8 +229,7 @@ async function isServerNameMalicious(serverName) {
       부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
     `.trim();
 
-    const result = await model.generateContent(prompt);
-    const isBad  = result.response.text().trim().toUpperCase().includes('TRUE');
+    const isBad = await analyzeText(prompt);
 
     if (isBad) { badServerNames.add(serverName);  return 'ai'; }
     else        { goodServerNames.add(serverName); return false; }
@@ -172,25 +239,20 @@ async function isServerNameMalicious(serverName) {
   }
 }
 
-async function analyzeImageWithAI(base64Image, mimeType) {
-  const prompt = `
-    이 이미지가 암호화폐 사기(Scam), 해킹된 계정의 스팸 트윗, 현실의 불법 카지노/도박장 홍보, 또는 악성 링크 유도 스팸인지 판별해.
+const IMAGE_ANALYSIS_PROMPT = `
+  이 이미지가 암호화폐 사기(Scam), 해킹된 계정의 스팸 트윗, 현실의 불법 카지노/도박장 홍보, 또는 악성 링크 유도 스팸인지 판별해.
 
-    [※ 핵심 예외 조건 - 아래의 경우는 무조건 'FALSE'로 판별할 것]
-    1. 마인크래프트 등 게임의 플레이 화면, 픽셀 그래픽 배경, 게임 내 UI, 채팅창 화면은 절대 차단하지 마.
-    2. 게임 화면 안에 '카지노', '도박', '룰렛', '거래' 등의 단어가 있더라도, 게임 내 콘텐츠이므로 스팸이 아니야.
-    3. 토스(Toss), 카카오페이, 일반 은행 앱 등의 정상적인 '송금 완료', '결제 내역' 영수증 스크린샷은 유저 간 정상적인 거래 인증용이므로 절대 차단하지 마.
-    4. 인터넷 밈(Meme, 예: Wojak, Pepe 등), 유머용 짤방, 리액션 이미지, 단순한 텍스트 캡처본은 명백한 사기/도박 웹사이트 주소(URL)가 포함되어 있지 않은 한 절대 차단하지 마.
-    5. 유튜브 영상 썸네일, 인터넷 방송 캡처 화면, 뮤직비디오 장면, 풍경/인물 사진에 자막이 달린 형태는 무조건 통과시켜. 화면에 '대우주', '신비주의' 같은 과장된 문구나 독특한 로고가 있더라도 영상 콘텐츠의 일부일 뿐 스팸이나 코인 사기가 아니야.
-    6. 디스코드, 카카오톡 등 일반적인 메신저의 채팅 캡처본은 명백한 불법 웹사이트 링크(URL)가 직접적으로 적혀있지 않은 이상 차단하지 마. 채팅 내용에 '주소', '백업 주소', '업체', '변경' 같은 단어가 있더라도 이는 단순한 게임 서버나 봇 운영 공지사항일 수 있으므로 스팸으로 간주하면 안 돼.
+  [※ 핵심 예외 조건 - 아래의 경우는 무조건 'FALSE'로 판별할 것]
+  1. 마인크래프트 등 게임의 플레이 화면, 픽셀 그래픽 배경, 게임 내 UI, 채팅창 화면은 절대 차단하지 마.
+  2. 게임 화면 안에 '카지노', '도박', '룰렛', '거래' 등의 단어가 있더라도, 게임 내 콘텐츠이므로 스팸이 아니야.
+  3. 토스(Toss), 카카오페이, 일반 은행 앱 등의 정상적인 '송금 완료', '결제 내역' 영수증 스크린샷은 유저 간 정상적인 거래 인증용이므로 절대 차단하지 마.
+  4. 인터넷 밈(Meme, 예: Wojak, Pepe 등), 유머용 짤방, 리액션 이미지, 단순한 텍스트 캡처본은 명백한 사기/도박 웹사이트 주소(URL)가 포함되어 있지 않은 한 절대 차단하지 마.
+  5. 유튜브 영상 썸네일, 인터넷 방송 캡처 화면, 뮤직비디오 장면, 풍경/인물 사진에 자막이 달린 형태는 무조건 통과시켜. 화면에 '대우주', '신비주의' 같은 과장된 문구나 독특한 로고가 있더라도 영상 콘텐츠의 일부일 뿐 스팸이나 코인 사기가 아니야.
+  6. 디스코드, 카카오톡 등 일반적인 메신저의 채팅 캡처본은 명백한 불법 웹사이트 링크(URL)가 직접적으로 적혀있지 않은 이상 차단하지 마. 채팅 내용에 '주소', '백업 주소', '업체', '변경' 같은 단어가 있더라도 이는 단순한 게임 서버나 봇 운영 공지사항일 수 있으므로 스팸으로 간주하면 안 돼.
 
-    오직 '게임/금융/일반 유머/방송 캡처/일상 채팅이 아닌' 실제 불법 도박장 홍보물, 일론 머스크 사칭, 코인 사기, 외부 악성 링크 유도일 경우에만 'TRUE'를 출력해.
-    부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
-  `.trim();
-
-  const result = await model.generateContent([prompt, { inlineData: { data: base64Image, mimeType } }]);
-  return result.response.text().trim().toUpperCase().includes('TRUE');
-}
+  오직 '게임/금융/일반 유머/방송 캡처/일상 채팅이 아닌' 실제 불법 도박장 홍보물, 일론 머스크 사칭, 코인 사기, 외부 악성 링크 유도일 경우에만 'TRUE'를 출력해.
+  부가 설명 없이 오직 'TRUE' 또는 'FALSE'로만 대답해.
+`.trim();
 
 async function fetchImageBuffer(imageUrl) {
   const controller = new AbortController();
@@ -225,10 +287,6 @@ async function checkImageAndModerate(message, imageUrl) {
       console.log('⏳ [타임아웃] 이미지 다운로드 시간 초과로 검사를 건너뜁니다.');
       return false;
     }
-    if (err.message?.includes('503')) {
-      console.log('⏳ [API 지연] Gemini 서버 혼잡으로 인해 검사를 건너뜁니다 (503).');
-      return false;
-    }
     logBlock('오류 [이미지 분석]', message, {
       reason: err.constructor?.name ?? '알 수 없는 오류',
       imageUrl,
@@ -261,23 +319,19 @@ async function checkImageAndModerate(message, imageUrl) {
     });
   }
 
-  const analyzePromise = analyzeImageWithAI(bufferData.toString('base64'), mimeType);
+  const analyzePromise = analyzeImage(IMAGE_ANALYSIS_PROMPT, bufferData.toString('base64'), mimeType);
   processingImages.set(hash, analyzePromise);
 
   let isFlagged = false;
   try {
     isFlagged = await analyzePromise;
   } catch (err) {
-    if (err.message?.includes('503')) {
-      console.log('⏳ [API 지연] Gemini 서버 혼잡으로 인해 검사를 건너뜁니다 (503).');
-    } else {
-      logBlock('오류 [이미지 분석]', message, {
-        reason: err.constructor?.name ?? '알 수 없는 오류',
-        imageUrl,
-        content: message.content || '(첨부파일)',
-        error:   String(err),
-      });
-    }
+    logBlock('오류 [이미지 분석]', message, {
+      reason: err.constructor?.name ?? '알 수 없는 오류',
+      imageUrl,
+      content: message.content || '(첨부파일)',
+      error:   String(err),
+    });
     return false;
   } finally {
     processingImages.delete(hash);
