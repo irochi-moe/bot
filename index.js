@@ -168,7 +168,7 @@ async function geminiImage(prompt, base64Image, mimeType) {
 
 async function openaiText(prompt) {
   const res = await openai.chat.completions.create({
-    model: 'gpt-5.4-nano',
+    model: 'gpt-5.4-mini',
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 5,
   });
@@ -177,7 +177,7 @@ async function openaiText(prompt) {
 
 async function openaiImage(prompt, base64Image, mimeType) {
   const res = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-5.4-mini',
     messages: [{
       role: 'user',
       content: [
