@@ -170,7 +170,7 @@ async function openaiText(prompt) {
   const res = await openai.chat.completions.create({
     model: 'gpt-5.4-mini',
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 5,
+    max_completion_tokens: 5,
   });
   return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
 }
@@ -185,7 +185,7 @@ async function openaiImage(prompt, base64Image, mimeType) {
         { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
       ],
     }],
-    max_tokens: 5,
+    max_completion_tokens: 5,
   });
   return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
 }
