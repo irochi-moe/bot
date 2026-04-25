@@ -10,8 +10,9 @@ const {
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { OpenAI }             = require('openai');
 
-const inviteRegex   = () => /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
-const imageUrlRegex = () => /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
+const inviteRegex      = () => /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
+const imageUrlRegex    = () => /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
+const ownServerRegex   = () => /(?:P[.\s]?E|PLANETEARTH|𝑃[.\s]?𝐸|𝑃𝐿𝐴𝑁𝐸𝑇𝐸𝐴𝑅𝑇𝐻|Ｐ[.\s]?Ｅ|ＰＬＡＮＥＴＥＡＲＴＨ|𝐏[.\s]?𝐄|플래닛어스|플어)/i;
 
 class BoundedSet {
   #set     = new Set();
@@ -39,12 +40,9 @@ const badServerNames    = new BoundedSet(500);
 const goodServerNames   = new BoundedSet(500);
 const badImageHashes    = new BoundedSet(500);
 const goodImageHashes   = new BoundedSet(500);
-
 const geminiModel = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
   .getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' });
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -81,7 +79,8 @@ function logBlock(type, message, extra = {}) {
   const author   = message.author?.tag   ?? '알 수 없음';
   const authorId = message.author?.id    ?? '알 수 없음';
 
-  const lines = [`[${type}] 서버: ${guild} | 채널: #${channel} | 작성자: ${author} (${authorId})`];
+  const timestamp = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
+  const lines = [`[${timestamp}] [${type}] 서버: ${guild} | 채널: #${channel} | 작성자: ${author} (${authorId})`];
   if (extra.reason)   lines.push(`사유: ${extra.reason}`);
   if (extra.content)  lines.push(`내용: ${extra.content}`);
   if (extra.imageUrl) lines.push(`이미지: ${extra.imageUrl}`);
@@ -209,6 +208,8 @@ function analyzeImage(prompt, base64Image, mimeType) {
 
 async function isServerNameMalicious(serverName) {
   if (!serverName) return false;
+
+  if (ownServerRegex().test(serverName)) return false;
 
   const lowerName = serverName.toLowerCase();
   if (
