@@ -34,7 +34,7 @@ class BoundedSet {
 }
 
 const recentlyProcessed = new BoundedSet(500);
-const processingImages  = new Map();   // hash → Promise<boolean>
+const processingImages  = new Map();
 const badServerNames    = new BoundedSet(500);
 const goodServerNames   = new BoundedSet(500);
 const badImageHashes    = new BoundedSet(500);
@@ -139,16 +139,19 @@ function shouldIgnore(message) {
   );
 }
 
-function is503(err) {
-  return err?.status === 503 || String(err?.message).includes('503');
+function shouldFallback(err) {
+  if (err?.status === 503 || err?.status === 429) return true;
+  const msg = String(err?.message).toUpperCase();
+  return msg.includes('503') || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
 }
 
 async function analyzeWithFallback(primary, fallback) {
   try {
     return await primary();
   } catch (err) {
-    if (!is503(err)) throw err;
-    console.log('⏳ [API 지연] Gemini 혼잡 (503) → OpenAI로 전환합니다.');
+    if (!shouldFallback(err)) throw err;
+    const reason = err?.status === 429 ? '할당량 초과 (429)' : '서버 혼잡 (503)';
+    console.log(`⏳ [API 지연] Gemini ${reason} → OpenAI로 전환합니다.`);
     return await fallback();
   }
 }
