@@ -10,9 +10,13 @@ const {
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { OpenAI }             = require('openai');
 
-const inviteRegex      = () => /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
-const imageUrlRegex    = () => /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
-const ownServerRegex   = () => /(?:P[.\s]?E|PLANETEARTH|𝑃[.\s]?𝐸|𝑃𝐿𝐴𝑁𝐸𝑇𝐸𝐴𝑅𝑇𝐻|Ｐ[.\s]?Ｅ|ＰＬＡＮＥＴＥＡＲＴＨ|𝐏[.\s]?𝐄|플래닛어스|플어)/i;
+const INVITE_REGEX       = /discord(?:\.gg|app\.com\/invite|\.com\/invite)\/([a-zA-Z0-9-]+)/gi;
+const IMAGE_URL_REGEX    = /https?:\/\/\S+\.(?:jpe?g|gif|png|webp)(?:\?\S*)?/gi;
+const OWN_SERVER_REGEX   = /(?:P[.\s]?E|PLANETEARTH|𝑃[.\s]?𝐸|𝑃𝐿𝐴𝑁𝐸𝑇𝐸𝐴𝑅𝑇𝐻|Ｐ[.\s]?Ｅ|ＰＬＡＮＥＴＥＡＲＴＨ|𝐏[.\s]?𝐄|플래닛어스|플어)/i;
+const MALICIOUS_KEYWORDS = [
+  'r18', '18+', 'nsfw', 'nude', 'hack', 'nitro', 'porn', 'sex',
+  'coin', 'crypto', '니트로', '카딩', '해킹툴', '키로거', 'sexy', '추천인',
+];
 
 class BoundedSet {
   #set     = new Set();
@@ -34,8 +38,9 @@ class BoundedSet {
   delete(value) { return this.#set.delete(value); }
 }
 
-const recentlyProcessed = new BoundedSet(500);
-const processingImages  = new Map();
+const recentlyProcessed     = new Map();
+const processingImages      = new Map();
+const processingServerNames = new Map();
 const badServerNames    = new BoundedSet(500);
 const goodServerNames   = new BoundedSet(500);
 const badImageHashes    = new BoundedSet(500);
@@ -48,7 +53,6 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildInvites,
   ],
 });
 
@@ -68,16 +72,21 @@ function isBlockedHost(urlString) {
 }
 
 function shouldSkipImageUrl(url) {
-  return ['cdn.discordapp.com', 'media.discordapp.net', 'ytimg.com', 'youtube.com'].some((host) =>
-    url.includes(host)
-  );
+  try {
+    const { hostname } = new URL(url);
+    return ['ytimg.com', 'youtube.com'].some(
+      (h) => hostname === h || hostname.endsWith(`.${h}`)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function logBlock(type, message, extra = {}) {
-  const guild    = message.guild?.name    ?? 'DM';
-  const channel  = message.channel?.name ?? '알 수 없음';
-  const author   = message.author?.tag   ?? '알 수 없음';
-  const authorId = message.author?.id    ?? '알 수 없음';
+  const guild    = message.guild?.name      ?? 'DM';
+  const channel  = message.channel?.name   ?? '알 수 없음';
+  const author   = message.author?.username ?? '알 수 없음';
+  const authorId = message.author?.id       ?? '알 수 없음';
 
   const timestamp = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
   const lines = [`[${timestamp}] [${type}] 서버: ${guild} | 채널: #${channel} | 작성자: ${author} (${authorId})`];
@@ -108,12 +117,7 @@ async function tryDeleteMessage(message) {
       return true;
     }
     return false;
-  } catch (err) {
-    if (err.code === 50013) {
-      console.warn(`[권한 부족] 메시지 삭제 실패 - 서버: ${message.guild?.name} | 채널: #${message.channel?.name ?? '알 수 없음'}`);
-    } else if (err.code !== 10008) {
-      console.error(`[오류] 메시지 삭제 실패 - 서버: ${message.guild?.name} | 채널: #${message.channel?.name ?? '알 수 없음'}\n오류: ${err}`);
-    }
+  } catch {
     return false;
   }
 }
@@ -134,30 +138,31 @@ function shouldIgnore(message) {
   return (
     !message.guild ||
     message.author?.bot ||
-    message.member?.permissions.has(PermissionFlagsBits.Administrator)
+    message.member?.permissions?.has(PermissionFlagsBits.Administrator)
   );
-}
-
-function shouldFallback(err) {
-  if (err?.status === 503 || err?.status === 429) return true;
-  const msg = String(err?.message).toUpperCase();
-  return msg.includes('503') || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
 }
 
 async function analyzeWithFallback(primary, fallback) {
   try {
     return await primary();
   } catch (err) {
-    if (!shouldFallback(err)) throw err;
-    const reason = err?.status === 429 ? '할당량 초과 (429)' : '서버 혼잡 (503)';
-    console.log(`⏳ [API 지연] Gemini ${reason} → OpenAI로 전환합니다.`);
+    const status = err?.status;
+    const msg    = String(err?.message).toUpperCase();
+    const isQuota    = status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+    const isOverload = status === 503 || msg.includes('503');
+    if (!isQuota && !isOverload) throw err;
+    console.log(`⏳ [API 지연] Gemini ${isQuota ? '할당량 초과 (429)' : '서버 혼잡 (503)'} → OpenAI로 전환합니다.`);
     return await fallback();
   }
 }
 
+function parseAIBool(text) {
+  return text.trim().toUpperCase().includes('TRUE');
+}
+
 async function geminiText(prompt) {
   const result = await geminiModel.generateContent(prompt);
-  return result.response.text().trim().toUpperCase().includes('TRUE');
+  return parseAIBool(result.response.text());
 }
 
 async function geminiImage(prompt, base64Image, mimeType) {
@@ -165,7 +170,7 @@ async function geminiImage(prompt, base64Image, mimeType) {
     prompt,
     { inlineData: { data: base64Image, mimeType } },
   ]);
-  return result.response.text().trim().toUpperCase().includes('TRUE');
+  return parseAIBool(result.response.text());
 }
 
 async function openaiText(prompt) {
@@ -174,7 +179,7 @@ async function openaiText(prompt) {
     messages: [{ role: 'user', content: prompt }],
     max_completion_tokens: 5,
   });
-  return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
+  return parseAIBool(res.choices[0].message.content ?? '');
 }
 
 async function openaiImage(prompt, base64Image, mimeType) {
@@ -189,13 +194,13 @@ async function openaiImage(prompt, base64Image, mimeType) {
     }],
     max_completion_tokens: 5,
   });
-  return res.choices[0].message.content.trim().toUpperCase().includes('TRUE');
+  return parseAIBool(res.choices[0].message.content ?? '');
 }
 
 function analyzeText(prompt) {
   return analyzeWithFallback(
-    ()  => geminiText(prompt),
-    ()  => openaiText(prompt),
+    () => geminiText(prompt),
+    () => openaiText(prompt),
   );
 }
 
@@ -209,20 +214,23 @@ function analyzeImage(prompt, base64Image, mimeType) {
 async function isServerNameMalicious(serverName) {
   if (!serverName) return false;
 
-  if (ownServerRegex().test(serverName)) return false;
+  if (OWN_SERVER_REGEX.test(serverName)) return false;
 
   const lowerName = serverName.toLowerCase();
-  if (
-    ['r18', '18+', 'nsfw', 'nude', 'hack', 'nitro', 'porn', 'sex',
-     'coin', 'crypto', '니트로', '카딩', '해킹툴', '키로거', 'sexy', '추천인']
-    .some((kw) => lowerName.includes(kw))
-  ) return 'keyword';
+  if (MALICIOUS_KEYWORDS.some((kw) => lowerName.includes(kw))) return 'keyword';
 
   if (badServerNames.has(serverName))  return 'cache';
   if (goodServerNames.has(serverName)) return false;
 
-  try {
-    const prompt = `
+  if (processingServerNames.has(serverName)) {
+    try {
+      return await processingServerNames.get(serverName);
+    } catch {
+      return false;
+    }
+  }
+
+  const prompt = `
       디스코드 서버 이름이 해킹·사기·NSFW·불법 도박 홍보 목적인지 판별해.
       게임 서버·길드·커뮤니티 이름처럼 보이거나 '카지노·도박·코인'이 게임 맥락이면 'FALSE'.
       실제 불법 성인물·도박장·해킹 서버 이름일 때만 'TRUE'.
@@ -230,13 +238,21 @@ async function isServerNameMalicious(serverName) {
       'TRUE' 또는 'FALSE'로만 답해.
     `.trim();
 
+  const analyzePromise = (async () => {
     const isBad = await analyzeText(prompt);
-
     if (isBad) { badServerNames.add(serverName);  return 'ai'; }
-    else        { goodServerNames.add(serverName); return false; }
+    goodServerNames.add(serverName);
+    return false;
+  })();
+
+  processingServerNames.set(serverName, analyzePromise);
+  try {
+    return await analyzePromise;
   } catch (err) {
     console.error('서버 이름 텍스트 분석 중 오류:', err);
     return false;
+  } finally {
+    processingServerNames.delete(serverName);
   }
 }
 
@@ -261,11 +277,22 @@ async function fetchImageBuffer(imageUrl) {
   try {
     const response = await fetch(imageUrl, { signal: controller.signal });
 
+    if (!response.ok) {
+      response.body?.cancel();
+      return null;
+    }
+
     const contentType = response.headers.get('content-type') ?? '';
-    if (!contentType.startsWith('image/')) return null;
+    if (!contentType.startsWith('image/')) {
+      response.body?.cancel();
+      return null;
+    }
 
     const contentLength = Number(response.headers.get('content-length'));
-    if (!isNaN(contentLength) && contentLength > 10 * 1024 * 1024) return null;
+    if (!isNaN(contentLength) && contentLength > 10 * 1024 * 1024) {
+      response.body?.cancel();
+      return null;
+    }
 
     const buffer = await response.arrayBuffer();
     if (buffer.byteLength > 10 * 1024 * 1024) return null;
@@ -311,7 +338,12 @@ async function checkImageAndModerate(message, imageUrl) {
 
   if (processingImages.has(hash)) {
     console.log(`[분석 대기] ${hash.slice(0, 6)}... 이미 분석 중인 이미지입니다. 결과를 기다립니다.`);
-    const isFlagged = await processingImages.get(hash);
+    let isFlagged;
+    try {
+      isFlagged = await processingImages.get(hash);
+    } catch {
+      return false;
+    }
     if (!isFlagged) return false;
     return deleteAndWarn(message, '이미지 차단 [캐시 - 동시 대기]', {
       reason: 'AI 분석 중인 동일 이미지 동시 업로드',
@@ -349,10 +381,8 @@ async function checkImageAndModerate(message, imageUrl) {
   return false;
 }
 
-client.on(Events.MessageCreate, async (message) => {
-  if (shouldIgnore(message)) return;
-
-  for (const match of message.content.matchAll(inviteRegex())) {
+async function checkInvitesAndModerate(message) {
+  for (const match of message.content.matchAll(INVITE_REGEX)) {
     let logType      = '';
     let deleteReason = '';
 
@@ -363,40 +393,70 @@ client.on(Events.MessageCreate, async (message) => {
 
       if (!result) continue;
 
-      [logType, deleteReason] = {
+      const entry = {
         keyword: ['링크 차단 [키워드]', `서버 이름에 금지 키워드 포함 (서버 이름: ${serverName})`],
         ai:      ['링크 차단 [AI]',     `AI 분석 결과 부적절한 서버 (서버 이름: ${serverName})`],
         cache:   ['링크 차단 [캐시]',   `캐시에 등록된 부적절한 서버 (서버 이름: ${serverName})`],
       }[result];
-    } catch {
+
+      if (!entry) continue;
+      [logType, deleteReason] = entry;
+    } catch (err) {
+      if (err?.code !== 10006) continue;
       logType      = '링크 차단 [만료]';
       deleteReason = '유효하지 않거나 만료된 초대 링크';
     }
 
     if (logType) {
       await deleteAndWarn(message, logType, { reason: deleteReason, content: message.content });
-      return;
+      return true;
     }
   }
+  return false;
+}
 
-  for (const match of message.content.matchAll(imageUrlRegex())) {
-    if (shouldSkipImageUrl(match[0])) continue;
-    if (await checkImageAndModerate(message, match[0])) return;
-  }
+client.on(Events.MessageCreate, async (message) => {
+  if (shouldIgnore(message)) return;
 
-  for (const [, attachment] of message.attachments) {
-    if (!attachment.contentType?.startsWith('image/')) continue;
-    if (await checkImageAndModerate(message, attachment.url)) return;
+  if (await checkInvitesAndModerate(message)) return;
+
+  const attachmentUrls = new Set(
+    [...message.attachments.values()]
+      .filter((a) => a.contentType?.startsWith('image/') && !shouldSkipImageUrl(a.url))
+      .map((a) => a.url)
+  );
+
+  const contentUrls = Array.from(message.content.matchAll(IMAGE_URL_REGEX), (m) => m[0])
+    .filter((url) => !shouldSkipImageUrl(url) && !attachmentUrls.has(url));
+
+  const imageUrls = [...contentUrls, ...attachmentUrls].slice(0, 5);
+
+  if (imageUrls.length > 0) {
+    const results = await Promise.all(imageUrls.map((url) => checkImageAndModerate(message, url)));
+    if (results.some(Boolean)) return;
   }
 });
 
 client.on(Events.MessageUpdate, async (_, newMessage) => {
+  if (newMessage.partial) {
+    try {
+      newMessage = await newMessage.fetch();
+    } catch {
+      return;
+    }
+  }
   if (shouldIgnore(newMessage)) return;
-  if (newMessage.embeds.length === 0) return;
 
   if (recentlyProcessed.has(newMessage.id)) return;
-  recentlyProcessed.add(newMessage.id);
-  setTimeout(() => recentlyProcessed.delete(newMessage.id), 30_000);
+  if (recentlyProcessed.size >= 1000) {
+    const oldestKey = recentlyProcessed.keys().next().value;
+    clearTimeout(recentlyProcessed.get(oldestKey));
+    recentlyProcessed.delete(oldestKey);
+  }
+  const tid = setTimeout(() => recentlyProcessed.delete(newMessage.id), 30_000);
+  recentlyProcessed.set(newMessage.id, tid);
+
+  if (await checkInvitesAndModerate(newMessage)) return;
 
   for (const embed of newMessage.embeds) {
     const imageUrl = embed.image?.url ?? embed.thumbnail?.url;
@@ -411,7 +471,7 @@ client.once(Events.ClientReady, () => {
     status: 'online',
   });
 
-  console.log(`Logged in as ${client.user.tag} (ID: ${client.user.id})`);
+  console.log(`Logged in as ${client.user.username} (ID: ${client.user.id})`);
   console.log('Joined servers:');
   client.guilds.cache.forEach((guild) => console.log(`  - ${guild.name} (${guild.id})`));
   console.log('Successfully started!');

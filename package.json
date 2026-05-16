@@ -1,7 +1,8 @@
 {
   "dependencies": {
     "@google/generative-ai": "^0.24",
-    "discord.js": "^14.25",
-    "dotenv": "^17.3"
+    "discord.js": "^14.26",
+    "dotenv": "^17.4",
+    "openai": "^6"
   }
 }
