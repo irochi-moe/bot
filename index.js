@@ -46,7 +46,7 @@ const goodServerNames   = new BoundedSet(500);
 const badImageHashes    = new BoundedSet(500);
 const goodImageHashes   = new BoundedSet(500);
 const geminiModel = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-  .getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' });
+  .getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const client = new Client({
   intents: [
@@ -261,12 +261,14 @@ const IMAGE_ANALYSIS_PROMPT = `
 
   아래는 무조건 'FALSE':
   - 게임 플레이 화면·UI·채팅 창 (어두운 배경에 컬러 텍스트여도 게임 채팅이면 FALSE)
-  - 게임 내 카지노·도박·킬·사망 등 게임 맥락 단어 포함 무관
+  - 게임 아이템 가치표·거래 시세·인벤토리·랭킹 등 게임 커뮤니티 웹사이트
+  - 게임 내 카지노·도박·킬·사망 등 게임 맥락 단어, 게임 재화 가격 포함 무관
   - 정상 송금·결제 영수증 (토스·카카오페이·은행 앱 등)
   - 밈·짤방·리액션 이미지 (명백한 사기 URL 없는 경우)
   - 유튜브·방송 캡처, 풍경·인물 사진 (자막·로고 포함 무관)
   - 메신저·게임 채팅 캡처 (불법 사이트 URL이 직접 적혀있지 않은 경우)
   - 터미널·코드 에디터·개발 도구 화면 (실제 악성코드 배포가 아닌 경우)
+  - 다크 테마 웹사이트라는 이유만으로 의심하지 말 것
 
   확신이 없으면 반드시 'FALSE'.
   피해자가 실제로 발생할 수 있는 사기·악성 링크 유도만 'TRUE'.
